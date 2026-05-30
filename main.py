@@ -5,6 +5,7 @@ import uuid
 from pathlib import Path
 
 from PySide6.QtCore import Qt, QUrl, QTimer
+from PySide6.QtGui import QMouseEvent
 from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer
 from PySide6.QtMultimediaWidgets import QVideoWidget
 from PySide6.QtWidgets import (
@@ -23,6 +24,25 @@ from PySide6.QtWidgets import (
     QVBoxLayout,
     QWidget,
 )
+
+
+class ClickableSlider(QSlider):
+    def mousePressEvent(self, event: QMouseEvent) -> None:
+        if event.button() == Qt.LeftButton:
+            pos = event.position() if hasattr(event, "position") else event.pos()
+            if self.orientation() == Qt.Horizontal:
+                length = self.width()
+                offset = pos.x()
+            else:
+                length = self.height()
+                offset = self.height() - pos.y()
+
+            if length > 0:
+                ratio = min(max(offset / length, 0.0), 1.0)
+                value = self.minimum() + int(ratio * (self.maximum() - self.minimum()))
+                self.setValue(value)
+                self.sliderMoved.emit(value)
+        super().mousePressEvent(event)
 
 VIDEO_EXTENSIONS = {
     ".mp4",
@@ -114,7 +134,7 @@ class VideoClipper(QMainWindow):
         self.set_end_button.clicked.connect(self.set_end)
         self.export_button.clicked.connect(self.export_clip)
 
-        self.position_slider = QSlider(Qt.Horizontal)
+        self.position_slider = ClickableSlider(Qt.Horizontal)
         self.position_slider.setRange(0, 0)
         self.position_slider.sliderMoved.connect(self.seek_position)
 
