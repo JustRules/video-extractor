@@ -94,8 +94,12 @@ class VideoClipper(QMainWindow):
         self.worked_videos_checkbox.clicked.connect(self.toggle_worked_filter)
         self.worked_videos_checkbox.setToolTip("Afficher seulement les vidéos avec des sélections ou clips exportés")
 
-        self.play_pause_button = QPushButton("Pause")
-        self.mute_button = QPushButton("Mute")
+        self.play_pause_button = QPushButton("⏸")
+        self.play_pause_button.setFixedWidth(40)
+        self.play_pause_button.setToolTip("Lecture / pause")
+        self.mute_button = QPushButton("🔈")
+        self.mute_button.setFixedWidth(40)
+        self.mute_button.setToolTip("Couper / rétablir le son")
         self.export_mode = QComboBox()
         self.export_mode.addItem("Propre (réencodage)", "clean")
         self.export_mode.addItem("Rapide (copy)", "fast")
@@ -135,7 +139,6 @@ class VideoClipper(QMainWindow):
         self.add_selection_button.clicked.connect(self.add_selection)
         self.remove_selection_button.clicked.connect(self.remove_selection)
         self.export_all_button.clicked.connect(self.export_all_selections)
-        sel_btn_layout.addWidget(self.add_selection_button)
         sel_btn_layout.addWidget(self.remove_selection_button)
         sel_btn_layout.addWidget(self.export_all_button)
         left_layout.addWidget(self.selections_label)
@@ -148,6 +151,7 @@ class VideoClipper(QMainWindow):
         control_layout.addWidget(self.export_mode)
         control_layout.addWidget(self.set_start_button)
         control_layout.addWidget(self.set_end_button)
+        control_layout.addWidget(self.add_selection_button)
         control_layout.addWidget(self.export_button)
 
         info_layout = QHBoxLayout()
@@ -287,7 +291,7 @@ class VideoClipper(QMainWindow):
         self.play_pause_button.setEnabled(True)
         self.mute_button.setEnabled(True)
         self.export_mode.setEnabled(True)
-        self.play_pause_button.setText("Pause")
+        self.play_pause_button.setText("⏸")
         self.start_ms = 0
         self.end_ms = 0
         self.update_markers()
@@ -358,7 +362,7 @@ class VideoClipper(QMainWindow):
         self.player.setSource(QUrl.fromLocalFile(str(video_path)))
         self.player.setPosition(int(start_s))
         self.player.play()
-        self.play_pause_button.setText("Pause")
+        self.play_pause_button.setText("⏸")
 
     def update_markers(self) -> None:
         self.start_label.setText(f"Début: {format_duration(self.start_ms)}")
@@ -394,15 +398,15 @@ class VideoClipper(QMainWindow):
     def toggle_play_pause(self) -> None:
         if self.player.playbackState() == QMediaPlayer.PlayingState:
             self.player.pause()
-            self.play_pause_button.setText("Play")
+            self.play_pause_button.setText("▶")
         else:
             self.player.play()
-            self.play_pause_button.setText("Pause")
+            self.play_pause_button.setText("⏸")
 
     def toggle_mute(self) -> None:
         muted = not self.audio_output.isMuted()
         self.audio_output.setMuted(muted)
-        self.mute_button.setText("Unmute" if muted else "Mute")
+        self.mute_button.setText("🔇" if muted else "🔈")
 
     def export_clip(self) -> None:
         # Export the current single selection (start_ms/end_ms)
