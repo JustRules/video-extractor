@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import Final
 
 from PySide6.QtCore import Qt, QUrl, QTimer
-from PySide6.QtGui import QMouseEvent
+from PySide6.QtGui import QColor, QMouseEvent
 from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer
 from PySide6.QtMultimediaWidgets import QVideoWidget
 from PySide6.QtWidgets import (
@@ -101,9 +101,10 @@ class VideoClipper(QMainWindow):
         self.current_video: Path | None = None
         self.start_ms = 0
         self.end_ms = 0
-        self.show_worked_only = False
+        self.video_filter = "all"
         self.selections: list[VideoSelection] = []
         self.worked_videos: set[str] = set()
+        self.ignored_videos: set[str] = set()
         self.work_tracker_file: Path | None = None
         self.ffmpeg_exe = find_ffmpeg()
 
@@ -130,9 +131,15 @@ class VideoClipper(QMainWindow):
         self.position_label = QLabel("Position: 00:00:00")
 
         self.scan_button = QPushButton("Scanner le dossier")
-        self.worked_videos_checkbox = QPushButton("Afficher travaillées")
-        self.worked_videos_checkbox.setCheckable(True)
-        self.worked_videos_checkbox.setToolTip("Afficher seulement les vidéos avec des sélections ou clips exportés")
+        self.filter_combo = QComboBox()
+        self.filter_combo.addItem("Aucun", "all")
+        self.filter_combo.addItem("Travaillées", "worked")
+        self.filter_combo.addItem("A Faire", "todo")
+        self.filter_combo.addItem("Ignorée", "ignored")
+        self.filter_combo.setToolTip("Filtrer les vidéos par état")
+        self.mark_ignored_button = QPushButton("Ignorer la vidéo")
+        self.mark_ignored_button.setEnabled(False)
+        self.mark_ignored_button.setToolTip("Marque la vidéo sélectionnée comme ne devant pas être travaillée")
 
         self.play_pause_button = QPushButton("⏸")
         self.play_pause_button.setFixedWidth(40)
@@ -174,7 +181,8 @@ class VideoClipper(QMainWindow):
 
         scan_layout = QHBoxLayout()
         scan_layout.addWidget(self.scan_button)
-        scan_layout.addWidget(self.worked_videos_checkbox)
+        scan_layout.addWidget(self.filter_combo)
+        scan_layout.addWidget(self.mark_ignored_button)
         left_layout.addLayout(scan_layout)
 
         left_layout.addWidget(self.video_list)
@@ -218,9 +226,11 @@ class VideoClipper(QMainWindow):
 
     def _connect_signals(self) -> None:
         self.scan_button.clicked.connect(self.select_folder)
-        self.worked_videos_checkbox.clicked.connect(self.toggle_worked_filter)
+        self.filter_combo.currentIndexChanged.connect(self.change_video_filter)
+        self.mark_ignored_button.clicked.connect(self.toggle_ignore_video)
         self.video_list.itemActivated.connect(self.load_video)
         self.video_list.itemClicked.connect(self.load_video)
+        self.video_list.currentItemChanged.connect(self.on_video_list_current_item_changed)
         self.selections_list.itemActivated.connect(self.goto_selection)
         self.add_selection_button.clicked.connect(self.add_selection)
         self.remove_selection_button.clicked.connect(self.remove_selection)
@@ -286,15 +296,18 @@ class VideoClipper(QMainWindow):
         self.work_tracker_file = self.video_folder / ".work_tracker.json"
         self.load_work_tracker()
         self.scan_videos()
+        self.update_ignore_button_state(None)
 
     def load_work_tracker(self) -> None:
         self.worked_videos = set()
+        self.ignored_videos = set()
         if self.work_tracker_file is None or not self.work_tracker_file.exists():
             return
         try:
             with self.work_tracker_file.open("r", encoding="utf-8") as f:
                 data = json.load(f)
                 self.worked_videos = set(data.get("worked_videos", []))
+                self.ignored_videos = set(data.get("ignored_videos", []))
         except Exception as e:
             self.log(f"Erreur lecture tracker: {e}")
 
@@ -303,19 +316,41 @@ class VideoClipper(QMainWindow):
             return
         try:
             with self.work_tracker_file.open("w", encoding="utf-8") as f:
-                json.dump({"worked_videos": sorted(list(self.worked_videos))}, f, indent=2, ensure_ascii=False)
+                json.dump(
+                    {
+                        "worked_videos": sorted(list(self.worked_videos)),
+                        "ignored_videos": sorted(list(self.ignored_videos)),
+                    },
+                    f,
+                    indent=2,
+                    ensure_ascii=False,
+                )
         except Exception as e:
             self.log(f"Erreur sauvegarde tracker: {e}")
 
     def mark_video_worked(self, video_path: Path) -> None:
+        self.ignored_videos.discard(video_path.name)
         self.worked_videos.add(video_path.name)
+        self.save_work_tracker()
+
+    def mark_video_ignored(self, video_path: Path) -> None:
+        self.worked_videos.discard(video_path.name)
+        self.ignored_videos.add(video_path.name)
+        self.save_work_tracker()
+
+    def unmark_video_ignored(self, video_path: Path) -> None:
+        self.ignored_videos.discard(video_path.name)
         self.save_work_tracker()
 
     def is_video_worked(self, video_path: Path) -> bool:
         return video_path.name in self.worked_videos
 
-    def toggle_worked_filter(self) -> None:
-        self.show_worked_only = self.worked_videos_checkbox.isChecked()
+    def is_video_ignored(self, video_path: Path) -> bool:
+        return video_path.name in self.ignored_videos
+
+    def change_video_filter(self, index: int) -> None:
+        selection = self.filter_combo.currentData()
+        self.video_filter = selection if isinstance(selection, str) else "all"
         self.refresh_video_list()
 
     def refresh_video_list(self) -> None:
@@ -334,15 +369,28 @@ class VideoClipper(QMainWindow):
             self.log("Aucune vidéo trouvée dans le dossier.")
             return
         for video in files:
-            if self.show_worked_only and not self.is_video_worked(video):
+            if self.video_filter == "worked" and not self.is_video_worked(video):
                 continue
+            if self.video_filter == "todo" and (self.is_video_worked(video) or self.is_video_ignored(video)):
+                continue
+            if self.video_filter == "ignored" and not self.is_video_ignored(video):
+                continue
+
             item = QListWidgetItem(video.name)
             item.setData(Qt.UserRole, str(video))
-            # Mark worked videos in bold
-            if self.is_video_worked(video):
+
+            if self.is_video_ignored(video):
+                item.setForeground(QColor("red"))
+                item.setToolTip("Vidéo à ignorer — ne pas travailler")
+            elif self.is_video_worked(video):
+                item.setForeground(QColor("green"))
+                item.setToolTip("Vidéo déjà travaillée")
                 font = item.font()
                 font.setBold(True)
                 item.setFont(font)
+            else:
+                item.setToolTip("Vidéo non marquée")
+
             self.video_list.addItem(item)
         displayed = self.video_list.count()
         self.log(f"{len(files)} vidéos trouvées, {displayed} affichées.")
@@ -373,6 +421,33 @@ class VideoClipper(QMainWindow):
         self.start_ms = 0
         self.end_ms = 0
         self.update_markers()
+        self.update_ignore_button_state(video_path)
+
+    def update_ignore_button_state(self, video_path: Path | None = None) -> None:
+        if video_path is None:
+            video_path = self.current_video
+        if video_path is None:
+            self.mark_ignored_button.setEnabled(False)
+            self.mark_ignored_button.setText("Ignorer la vidéo")
+            return
+
+        self.mark_ignored_button.setEnabled(True)
+        if self.is_video_ignored(video_path):
+            self.mark_ignored_button.setText("Annuler l'ignoré")
+        else:
+            self.mark_ignored_button.setText("Ignorer la vidéo")
+
+    def toggle_ignore_video(self) -> None:
+        if self.current_video is None:
+            return
+        if self.is_video_ignored(self.current_video):
+            self.unmark_video_ignored(self.current_video)
+            self.log(f"Vidéo de nouveau marquée comme travaillable : {self.current_video.name}")
+        else:
+            self.mark_video_ignored(self.current_video)
+            self.log(f"Vidéo marquée à ignorer : {self.current_video.name}")
+        self.refresh_video_list()
+        self.update_ignore_button_state()
 
     def set_start(self) -> None:
         if self.current_video is None:
@@ -480,6 +555,14 @@ class VideoClipper(QMainWindow):
         else:
             self.player.play()
             self.play_pause_button.setText("⏸")
+
+    def on_video_list_current_item_changed(self, current: QListWidgetItem | None, previous: QListWidgetItem | None) -> None:
+        if current is None:
+            self.update_ignore_button_state(None)
+            return
+
+        video_path = Path(current.data(Qt.UserRole))
+        self.update_ignore_button_state(video_path)
 
     def toggle_mute(self) -> None:
         muted = not self.audio_output.isMuted()
