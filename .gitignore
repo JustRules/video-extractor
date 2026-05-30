@@ -6,3 +6,5 @@ __pycache__/
 *.swp
 .DS_Store
 clips/
+dist/
+build/video-extractor/
