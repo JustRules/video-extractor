@@ -24,22 +24,10 @@ from PySide6.QtWidgets import (
     QTextEdit,
     QVBoxLayout,
     QWidget,
+    QAbstractItemView,
 )
 
 VideoSelection = tuple[str, int, int]
-VIDEO_EXTENSIONS: Final[set[str]] = {
-    ".mp4",
-    ".mov",
-    ".mkv",
-    ".avi",
-    ".wmv",
-    ".webm",
-    ".flv",
-    ".mpg",
-    ".mpeg",
-    ".mp4v",
-    ".m4v",
-}
 
 
 class ClickableSlider(QSlider):
@@ -171,6 +159,12 @@ class VideoClipper(QMainWindow):
 
         self.selections_label = QLabel("Sélections :")
         self.selections_list = QListWidget()
+        self.selections_list.setSelectionMode(QAbstractItemView.SingleSelection)
+        self.selections_list.setDragEnabled(True)
+        self.selections_list.setAcceptDrops(True)
+        self.selections_list.setDropIndicatorShown(True)
+        self.selections_list.setDragDropMode(QAbstractItemView.InternalMove)
+        self.selections_list.setDefaultDropAction(Qt.MoveAction)
         self.add_selection_button = QPushButton("Ajouter sélection")
         self.remove_selection_button = QPushButton("Supprimer sélection")
         self.export_all_button = QPushButton("Exporter tout")
@@ -232,6 +226,7 @@ class VideoClipper(QMainWindow):
         self.video_list.itemClicked.connect(self.load_video)
         self.video_list.currentItemChanged.connect(self.on_video_list_current_item_changed)
         self.selections_list.itemActivated.connect(self.goto_selection)
+        self.selections_list.model().rowsMoved.connect(self.on_selections_rows_moved)
         self.add_selection_button.clicked.connect(self.add_selection)
         self.remove_selection_button.clicked.connect(self.remove_selection)
         self.export_all_button.clicked.connect(self.export_all_selections)
@@ -466,6 +461,8 @@ class VideoClipper(QMainWindow):
             self.start_ms = max(0, self.end_ms - 1000)
         self.update_markers()
         self.log(f"Fin définie sur {format_duration(self.end_ms)}")
+        if self.start_ms < self.end_ms:
+            self.add_selection()
 
     def add_selection(self) -> None:
         if self.current_video is None:
@@ -520,6 +517,21 @@ class VideoClipper(QMainWindow):
     def update_markers(self) -> None:
         self.start_label.setText(f"Début: {format_duration(self.start_ms)}")
         self.end_label.setText(f"Fin: {format_duration(self.end_ms)}")
+
+    def on_selections_rows_moved(self, parent, start, end, destination, row) -> None:
+        self.sync_selections_order()
+
+    def sync_selections_order(self) -> None:
+        new_order: list[VideoSelection] = []
+        for index in range(self.selections_list.count()):
+            item = self.selections_list.item(index)
+            data = item.data(Qt.UserRole)
+            try:
+                vid, start_s, end_s = json.loads(str(data))
+            except Exception:
+                continue
+            new_order.append((vid, int(start_s), int(end_s)))
+        self.selections = new_order
 
     def on_position_changed(self, position: int) -> None:
         self.position_label.setText(f"Position: {format_duration(position)}")
