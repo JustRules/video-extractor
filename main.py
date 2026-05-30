@@ -88,6 +88,12 @@ class VideoClipper(QMainWindow):
         self.scan_button = QPushButton("Scanner le dossier")
         self.scan_button.clicked.connect(self.select_folder)
 
+        self.show_worked_only = False
+        self.worked_videos_checkbox = QPushButton("Afficher travaillées")
+        self.worked_videos_checkbox.setCheckable(True)
+        self.worked_videos_checkbox.clicked.connect(self.toggle_worked_filter)
+        self.worked_videos_checkbox.setToolTip("Afficher seulement les vidéos avec des sélections ou clips exportés")
+
         self.play_pause_button = QPushButton("Pause")
         self.mute_button = QPushButton("Mute")
         self.export_mode = QComboBox()
@@ -114,7 +120,10 @@ class VideoClipper(QMainWindow):
 
         left_layout = QVBoxLayout()
         left_layout.addWidget(self.folder_label)
-        left_layout.addWidget(self.scan_button)
+        scan_layout = QHBoxLayout()
+        scan_layout.addWidget(self.scan_button)
+        scan_layout.addWidget(self.worked_videos_checkbox)
+        left_layout.addLayout(scan_layout)
         left_layout.addWidget(self.video_list)
         self.selections_label = QLabel("Sélections :")
         self.selections_list = QListWidget()
@@ -176,6 +185,9 @@ class VideoClipper(QMainWindow):
             self.export_button.setEnabled(False)
         # internal storage for multiple selections (list of (video_path, start_ms, end_ms))
         self.selections: list[tuple[str, int, int]] = []
+        # track worked videos in JSON file
+        self.worked_videos: set[str] = set()
+        self.work_tracker_file: Path | None = None
 
     def log(self, message: str) -> None:
         self.log_output.append(message)
@@ -186,14 +198,46 @@ class VideoClipper(QMainWindow):
             return
         self.video_folder = Path(folder)
         self.folder_label.setText(str(self.video_folder))
+        # Initialize work tracker file for this folder
+        self.work_tracker_file = self.video_folder / ".work_tracker.json"
+        self.load_work_tracker()
         self.scan_videos()
 
-    def scan_videos(self) -> None:
+    def load_work_tracker(self) -> None:
+        self.worked_videos = set()
+        if self.work_tracker_file is None or not self.work_tracker_file.exists():
+            return
+        try:
+            with self.work_tracker_file.open("r", encoding="utf-8") as f:
+                data = json.load(f)
+                self.worked_videos = set(data.get("worked_videos", []))
+        except Exception as e:
+            self.log(f"Erreur lecture tracker: {e}")
+
+    def save_work_tracker(self) -> None:
+        if self.work_tracker_file is None:
+            return
+        try:
+            with self.work_tracker_file.open("w", encoding="utf-8") as f:
+                json.dump({"worked_videos": sorted(list(self.worked_videos))}, f, indent=2, ensure_ascii=False)
+        except Exception as e:
+            self.log(f"Erreur sauvegarde tracker: {e}")
+
+    def mark_video_worked(self, video_path: Path) -> None:
+        self.worked_videos.add(video_path.name)
+        self.save_work_tracker()
+
+    def is_video_worked(self, video_path: Path) -> bool:
+        return video_path.name in self.worked_videos
+
+    def toggle_worked_filter(self) -> None:
+        self.show_worked_only = self.worked_videos_checkbox.isChecked()
+        self.refresh_video_list()
+
+    def refresh_video_list(self) -> None:
         self.video_list.clear()
         if self.video_folder is None:
             return
-
-        self.log(f"Scan du dossier {self.video_folder}")
         files = sorted(
             [
                 p
@@ -202,17 +246,28 @@ class VideoClipper(QMainWindow):
             ],
             key=lambda p: p.name.lower(),
         )
-
         if not files:
             self.log("Aucune vidéo trouvée dans le dossier.")
             return
-
         for video in files:
+            if self.show_worked_only and not self.is_video_worked(video):
+                continue
             item = QListWidgetItem(video.name)
             item.setData(Qt.UserRole, str(video))
+            # Mark worked videos in bold
+            if self.is_video_worked(video):
+                font = item.font()
+                font.setBold(True)
+                item.setFont(font)
             self.video_list.addItem(item)
+        displayed = self.video_list.count()
+        self.log(f"{len(files)} vidéos trouvées, {displayed} affichées.")
 
-        self.log(f"{len(files)} vidéos trouvées.")
+    def scan_videos(self) -> None:
+        if self.video_folder is None:
+            return
+        self.log(f"Scan du dossier {self.video_folder}")
+        self.refresh_video_list()
 
     def load_video(self, item: QListWidgetItem | None = None) -> None:
         if item is None:
@@ -263,10 +318,12 @@ class VideoClipper(QMainWindow):
             return
         sel = (str(self.current_video), int(self.start_ms), int(self.end_ms))
         self.selections.append(sel)
+        self.mark_video_worked(self.current_video)
         label = f"{Path(sel[0]).name}: {format_duration(sel[1])} → {format_duration(sel[2])}"
         item = QListWidgetItem(label)
         item.setData(Qt.UserRole, json.dumps(list(sel)))
         self.selections_list.addItem(item)
+        self.refresh_video_list()  # Refresh to show work status
         self.log(f"Sélection ajoutée: {label}")
 
     def remove_selection(self) -> None:
@@ -282,6 +339,7 @@ class VideoClipper(QMainWindow):
         if vid is not None:
             self.selections = [s for s in self.selections if not (s[0] == vid and s[1] == start_s and s[2] == end_s)]
         self.selections_list.takeItem(self.selections_list.row(item))
+        self.refresh_video_list()  # Refresh to update work status
         self.log("Sélection supprimée")
 
     def goto_selection(self, item: QListWidgetItem) -> None:
@@ -363,6 +421,7 @@ class VideoClipper(QMainWindow):
             QMessageBox.warning(self, "Intervalle incorrect", "Intervalle invalide.")
             return False
 
+        self.mark_video_worked(video)
         output_dir = video.parent / "clips"
         output_dir.mkdir(parents=True, exist_ok=True)
 
@@ -478,6 +537,7 @@ class VideoClipper(QMainWindow):
                 self.log(f"Fichier introuvable pour export groupé: {video}")
                 continue
 
+            self.mark_video_worked(video)
             output_dir = video.parent / "clips"
             output_dir.mkdir(parents=True, exist_ok=True)
             final_name = f"{video.stem}_grouped{video.suffix}"
