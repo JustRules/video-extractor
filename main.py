@@ -1,8 +1,9 @@
+import json
 import subprocess
 import sys
-import json
 import uuid
 from pathlib import Path
+from typing import Final
 
 from PySide6.QtCore import Qt, QUrl, QTimer
 from PySide6.QtGui import QMouseEvent
@@ -11,9 +12,9 @@ from PySide6.QtMultimediaWidgets import QVideoWidget
 from PySide6.QtWidgets import (
     QApplication,
     QFileDialog,
+    QComboBox,
     QHBoxLayout,
     QLabel,
-        QComboBox,
     QListWidget,
     QListWidgetItem,
     QMainWindow,
@@ -24,6 +25,21 @@ from PySide6.QtWidgets import (
     QVBoxLayout,
     QWidget,
 )
+
+VideoSelection = tuple[str, int, int]
+VIDEO_EXTENSIONS: Final[set[str]] = {
+    ".mp4",
+    ".mov",
+    ".mkv",
+    ".avi",
+    ".wmv",
+    ".webm",
+    ".flv",
+    ".mpg",
+    ".mpeg",
+    ".mp4v",
+    ".m4v",
+}
 
 
 class ClickableSlider(QSlider):
@@ -85,8 +101,21 @@ class VideoClipper(QMainWindow):
         self.current_video: Path | None = None
         self.start_ms = 0
         self.end_ms = 0
-
+        self.show_worked_only = False
+        self.selections: list[VideoSelection] = []
+        self.worked_videos: set[str] = set()
+        self.work_tracker_file: Path | None = None
         self.ffmpeg_exe = find_ffmpeg()
+
+        self._create_widgets()
+        self._create_layout()
+        self._connect_signals()
+        self._finalize_ui()
+
+    def _create_widgets(self) -> None:
+        self.folder_label = QLabel("Aucun dossier sélectionné")
+
+        self.video_list = QListWidget()
 
         self.player = QMediaPlayer()
         self.audio_output = QAudioOutput()
@@ -96,22 +125,13 @@ class VideoClipper(QMainWindow):
         self.video_widget.setAspectRatioMode(Qt.KeepAspectRatio)
         self.player.setVideoOutput(self.video_widget)
 
-        self.folder_label = QLabel("Aucun dossier sélectionné")
-        self.video_list = QListWidget()
-        self.video_list.itemActivated.connect(self.load_video)
-        self.video_list.itemClicked.connect(self.load_video)
-
         self.start_label = QLabel("Début: 00:00:00")
         self.end_label = QLabel("Fin: 00:00:00")
         self.position_label = QLabel("Position: 00:00:00")
 
         self.scan_button = QPushButton("Scanner le dossier")
-        self.scan_button.clicked.connect(self.select_folder)
-
-        self.show_worked_only = False
         self.worked_videos_checkbox = QPushButton("Afficher travaillées")
         self.worked_videos_checkbox.setCheckable(True)
-        self.worked_videos_checkbox.clicked.connect(self.toggle_worked_filter)
         self.worked_videos_checkbox.setToolTip("Afficher seulement les vidéos avec des sélections ou clips exportés")
 
         self.play_pause_button = QPushButton("⏸")
@@ -120,54 +140,56 @@ class VideoClipper(QMainWindow):
         self.mute_button = QPushButton("🔈")
         self.mute_button.setFixedWidth(40)
         self.mute_button.setToolTip("Couper / rétablir le son")
+        self.volume_slider = QSlider(Qt.Horizontal)
+        self.volume_slider.setRange(0, 100)
+        self.volume_slider.setValue(100)
+        self.volume_slider.setToolTip("Volume audio")
+        self.volume_slider.setFixedWidth(120)
+
         self.export_mode = QComboBox()
         self.export_mode.addItem("Propre (réencodage)", "clean")
         self.export_mode.addItem("Rapide (copy)", "fast")
         self.export_mode.setToolTip("Mode d'export : Propre réencode, Rapide copie les flux")
+
         self.set_start_button = QPushButton("Définir début")
         self.set_end_button = QPushButton("Définir fin")
         self.export_button = QPushButton("Exporter l'extrait")
 
-        self.play_pause_button.clicked.connect(self.toggle_play_pause)
-        self.mute_button.clicked.connect(self.toggle_mute)
-        self.set_start_button.clicked.connect(self.set_start)
-        self.set_end_button.clicked.connect(self.set_end)
-        self.export_button.clicked.connect(self.export_clip)
-
         self.position_slider = ClickableSlider(Qt.Horizontal)
         self.position_slider.setRange(0, 0)
-        self.position_slider.sliderMoved.connect(self.seek_position)
 
         self.log_output = QTextEdit()
         self.log_output.setReadOnly(True)
         self.log_output.setPlaceholderText("Journaux d'export et informations...")
 
+        self.selections_label = QLabel("Sélections :")
+        self.selections_list = QListWidget()
+        self.add_selection_button = QPushButton("Ajouter sélection")
+        self.remove_selection_button = QPushButton("Supprimer sélection")
+        self.export_all_button = QPushButton("Exporter tout")
+
+    def _create_layout(self) -> None:
         left_layout = QVBoxLayout()
         left_layout.addWidget(self.folder_label)
+
         scan_layout = QHBoxLayout()
         scan_layout.addWidget(self.scan_button)
         scan_layout.addWidget(self.worked_videos_checkbox)
         left_layout.addLayout(scan_layout)
+
         left_layout.addWidget(self.video_list)
-        self.selections_label = QLabel("Sélections :")
-        self.selections_list = QListWidget()
-        self.selections_list.itemActivated.connect(self.goto_selection)
-        sel_btn_layout = QHBoxLayout()
-        self.add_selection_button = QPushButton("Ajouter sélection")
-        self.remove_selection_button = QPushButton("Supprimer sélection")
-        self.export_all_button = QPushButton("Exporter tout")
-        self.add_selection_button.clicked.connect(self.add_selection)
-        self.remove_selection_button.clicked.connect(self.remove_selection)
-        self.export_all_button.clicked.connect(self.export_all_selections)
-        sel_btn_layout.addWidget(self.remove_selection_button)
-        sel_btn_layout.addWidget(self.export_all_button)
         left_layout.addWidget(self.selections_label)
         left_layout.addWidget(self.selections_list)
+
+        sel_btn_layout = QHBoxLayout()
+        sel_btn_layout.addWidget(self.remove_selection_button)
+        sel_btn_layout.addWidget(self.export_all_button)
         left_layout.addLayout(sel_btn_layout)
 
         control_layout = QHBoxLayout()
         control_layout.addWidget(self.play_pause_button)
         control_layout.addWidget(self.mute_button)
+        control_layout.addWidget(self.volume_slider)
         control_layout.addWidget(self.export_mode)
         control_layout.addWidget(self.set_start_button)
         control_layout.addWidget(self.set_end_button)
@@ -194,24 +216,62 @@ class VideoClipper(QMainWindow):
         container.setLayout(main_layout)
         self.setCentralWidget(container)
 
+    def _connect_signals(self) -> None:
+        self.scan_button.clicked.connect(self.select_folder)
+        self.worked_videos_checkbox.clicked.connect(self.toggle_worked_filter)
+        self.video_list.itemActivated.connect(self.load_video)
+        self.video_list.itemClicked.connect(self.load_video)
+        self.selections_list.itemActivated.connect(self.goto_selection)
+        self.add_selection_button.clicked.connect(self.add_selection)
+        self.remove_selection_button.clicked.connect(self.remove_selection)
+        self.export_all_button.clicked.connect(self.export_all_selections)
+        self.play_pause_button.clicked.connect(self.toggle_play_pause)
+        self.mute_button.clicked.connect(self.toggle_mute)
+        self.volume_slider.valueChanged.connect(self.set_volume)
+        self.set_start_button.clicked.connect(self.set_start)
+        self.set_end_button.clicked.connect(self.set_end)
+        self.export_button.clicked.connect(self.export_clip)
+        self.position_slider.sliderMoved.connect(self.seek_position)
         self.player.positionChanged.connect(self.on_position_changed)
         self.player.durationChanged.connect(self.on_duration_changed)
         self.player.mediaStatusChanged.connect(self.on_media_status_changed)
         self.player.errorOccurred.connect(self.on_player_error)
 
+    def _finalize_ui(self) -> None:
         self.play_pause_button.setEnabled(False)
         self.mute_button.setEnabled(False)
+        self.volume_slider.setEnabled(False)
         self.export_mode.setEnabled(False)
         self.statusBar().showMessage("Prêt")
 
         if self.ffmpeg_exe is None:
             self.log("FFmpeg introuvable. Ajoutez FFmpeg au PATH Windows.")
             self.export_button.setEnabled(False)
-        # internal storage for multiple selections (list of (video_path, start_ms, end_ms))
-        self.selections: list[tuple[str, int, int]] = []
-        # track worked videos in JSON file
-        self.worked_videos: set[str] = set()
-        self.work_tracker_file: Path | None = None
+
+    def _get_export_mode(self) -> str:
+        mode = self.export_mode.currentData()
+        return mode if isinstance(mode, str) else "clean"
+
+    def _run_ffmpeg(self, command: list[str]) -> subprocess.CompletedProcess[str]:
+        return subprocess.run(command, capture_output=True, text=True)
+
+    def _set_play_pause_icon(self, playing: bool) -> None:
+        self.play_pause_button.setText("⏸" if playing else "▶")
+
+    def _set_mute_icon(self, muted: bool) -> None:
+        self.mute_button.setText("🔇" if muted else "🔈")
+
+    def _set_playback_enabled(self, enabled: bool) -> None:
+        self.play_pause_button.setEnabled(enabled)
+        self.mute_button.setEnabled(enabled)
+        self.export_mode.setEnabled(enabled)
+        self.volume_slider.setEnabled(enabled)
+
+    def set_volume(self, value: int) -> None:
+        is_muted = value == 0
+        self.audio_output.setVolume(value / 100.0)
+        self.audio_output.setMuted(is_muted)
+        self._set_mute_icon(is_muted)
 
     def log(self, message: str) -> None:
         self.log_output.append(message)
@@ -308,10 +368,8 @@ class VideoClipper(QMainWindow):
         self.player.setSource(QUrl.fromLocalFile(str(video_path)))
         self.player.play()
         self.statusBar().showMessage(f"Lecture: {video_path.name}")
-        self.play_pause_button.setEnabled(True)
-        self.mute_button.setEnabled(True)
-        self.export_mode.setEnabled(True)
-        self.play_pause_button.setText("⏸")
+        self._set_playback_enabled(True)
+        self._set_play_pause_icon(True)
         self.start_ms = 0
         self.end_ms = 0
         self.update_markers()
