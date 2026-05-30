@@ -35,6 +35,28 @@ ffmpeg -version
 python main.py
 ```
 
+## Version exécutable Windows
+
+1. Activez l'environnement virtuel :
+
+```powershell
+.\.venv\Scripts\Activate.ps1
+```
+
+2. Exécutez le script de build :
+
+```powershell
+.\build-exe.ps1
+```
+
+- ou double-cliquez sur `build-exe.bat` si vous préférez lancer le build sans saisie manuelle.
+
+3. L'exécutable se trouve ensuite dans le dossier `dist` :
+
+- `dist\video-extractor.exe`
+
+> Note : FFmpeg doit être installé et disponible dans le `PATH` pour que l'application fonctionne correctement.
+
 ## Fonctionnalités
 
 - scanner un dossier de vidéos
