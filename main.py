@@ -29,8 +29,18 @@ from PySide6.QtWidgets import (
 
 VideoSelection = tuple[str, int, int]
 
+# Navigation constants (in milliseconds and frames)
+SEEK_STEP_MS = 1000  # 5 seconds for +/- buttons
+FRAME_DURATION_MS = 33.33  # ~30fps (can be adjusted based on video)
+SLIDER_TOOLTIP_MARGIN = 10  # pixels
+
 
 class ClickableSlider(QSlider):
+    def __init__(self, orientation) -> None:
+        super().__init__(orientation)
+        self.duration_ms = 0
+        self.setMouseTracking(True)
+
     def mousePressEvent(self, event: QMouseEvent) -> None:
         if event.button() == Qt.LeftButton:
             pos = event.position() if hasattr(event, "position") else event.pos()
@@ -47,6 +57,23 @@ class ClickableSlider(QSlider):
                 self.setValue(value)
                 self.sliderMoved.emit(value)
         super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event: QMouseEvent) -> None:
+        if self.duration_ms == 0 or self.maximum() == 0:
+            return
+        pos = event.position() if hasattr(event, "position") else event.pos()
+        if self.orientation() == Qt.Horizontal:
+            length = self.width()
+            offset = pos.x()
+        else:
+            length = self.height()
+            offset = self.height() - pos.y()
+        if length > 0:
+            ratio = min(max(offset / length, 0.0), 1.0)
+            value = self.minimum() + int(ratio * (self.maximum() - self.minimum()))
+            time_ms = int(ratio * self.duration_ms)
+            self.setToolTip(format_duration(time_ms))
+        super().mouseMoveEvent(event)
 
 VIDEO_EXTENSIONS = {
     ".mp4",
@@ -153,6 +180,24 @@ class VideoClipper(QMainWindow):
         self.position_slider = ClickableSlider(Qt.Horizontal)
         self.position_slider.setRange(0, 0)
 
+        self.seek_backward_button = QPushButton("⏪ -5s")
+        self.seek_backward_button.setFixedWidth(60)
+        self.seek_backward_button.setToolTip("Reculer de 5 secondes (←)")
+        self.seek_backward_button.setEnabled(False)
+        self.seek_forward_button = QPushButton("+5s ⏩")
+        self.seek_forward_button.setFixedWidth(60)
+        self.seek_forward_button.setToolTip("Avancer de 5 secondes (→)")
+        self.seek_forward_button.setEnabled(False)
+
+        self.frame_backward_button = QPushButton("◀ Frame")
+        self.frame_backward_button.setFixedWidth(70)
+        self.frame_backward_button.setToolTip("Reculer d'une frame (,)")
+        self.frame_backward_button.setEnabled(False)
+        self.frame_forward_button = QPushButton("Frame ▶")
+        self.frame_forward_button.setFixedWidth(70)
+        self.frame_forward_button.setToolTip("Avancer d'une frame (;)")
+        self.frame_forward_button.setEnabled(False)
+
         self.log_output = QTextEdit()
         self.log_output.setReadOnly(True)
         self.log_output.setPlaceholderText("Journaux d'export et informations...")
@@ -192,6 +237,10 @@ class VideoClipper(QMainWindow):
         control_layout.addWidget(self.play_pause_button)
         control_layout.addWidget(self.mute_button)
         control_layout.addWidget(self.volume_slider)
+        control_layout.addWidget(self.seek_backward_button)
+        control_layout.addWidget(self.seek_forward_button)
+        control_layout.addWidget(self.frame_backward_button)
+        control_layout.addWidget(self.frame_forward_button)
         control_layout.addWidget(self.export_mode)
         control_layout.addWidget(self.set_start_button)
         control_layout.addWidget(self.set_end_button)
@@ -237,6 +286,10 @@ class VideoClipper(QMainWindow):
         self.set_end_button.clicked.connect(self.set_end)
         self.export_button.clicked.connect(self.export_clip)
         self.position_slider.sliderMoved.connect(self.seek_position)
+        self.seek_backward_button.clicked.connect(self.seek_backward)
+        self.seek_forward_button.clicked.connect(self.seek_forward)
+        self.frame_backward_button.clicked.connect(self.frame_backward)
+        self.frame_forward_button.clicked.connect(self.frame_forward)
         self.player.positionChanged.connect(self.on_position_changed)
         self.player.durationChanged.connect(self.on_duration_changed)
         self.player.mediaStatusChanged.connect(self.on_media_status_changed)
@@ -271,6 +324,10 @@ class VideoClipper(QMainWindow):
         self.mute_button.setEnabled(enabled)
         self.export_mode.setEnabled(enabled)
         self.volume_slider.setEnabled(enabled)
+        self.seek_backward_button.setEnabled(enabled)
+        self.seek_forward_button.setEnabled(enabled)
+        self.frame_backward_button.setEnabled(enabled)
+        self.frame_forward_button.setEnabled(enabled)
 
     def set_volume(self, value: int) -> None:
         is_muted = value == 0
@@ -542,9 +599,40 @@ class VideoClipper(QMainWindow):
 
     def on_duration_changed(self, duration: int) -> None:
         self.position_slider.setRange(0, duration)
+        self.position_slider.duration_ms = duration
 
     def seek_position(self, position: int) -> None:
         self.player.setPosition(position)
+
+    def seek_backward(self) -> None:
+        """Reculer de SEEK_STEP_MS (5 secondes)."""
+        new_position = max(0, int(self.player.position()) - SEEK_STEP_MS)
+        self.player.setPosition(new_position)
+
+    def seek_forward(self) -> None:
+        """Avancer de SEEK_STEP_MS (5 secondes)."""
+        duration = self.player.duration()
+        new_position = min(duration, int(self.player.position()) + SEEK_STEP_MS)
+        self.player.setPosition(new_position)
+
+    def frame_backward(self) -> None:
+        """Reculer d'une frame (~33ms à 30fps)."""
+        new_position = max(0, int(self.player.position()) - int(FRAME_DURATION_MS))
+        self.player.setPosition(new_position)
+        # Pause to allow frame-by-frame navigation
+        if self.player.playbackState() == QMediaPlayer.PlayingState:
+            self.player.pause()
+            self._set_play_pause_icon(False)
+
+    def frame_forward(self) -> None:
+        """Avancer d'une frame (~33ms à 30fps)."""
+        duration = self.player.duration()
+        new_position = min(duration, int(self.player.position()) + int(FRAME_DURATION_MS))
+        self.player.setPosition(new_position)
+        # Pause to allow frame-by-frame navigation
+        if self.player.playbackState() == QMediaPlayer.PlayingState:
+            self.player.pause()
+            self._set_play_pause_icon(False)
 
     def on_media_status_changed(self, status) -> None:
         if status == QMediaPlayer.InvalidMedia:
@@ -580,6 +668,42 @@ class VideoClipper(QMainWindow):
         muted = not self.audio_output.isMuted()
         self.audio_output.setMuted(muted)
         self.mute_button.setText("🔇" if muted else "🔈")
+
+    def keyPressEvent(self, event) -> None:
+        """Handle keyboard shortcuts for video navigation and controls.
+        
+        Shortcuts:
+        - Space / L : Play/Pause
+        - Left Arrow : Seek backward (-5s)
+        - Right Arrow : Seek forward (+5s)
+        - J : Seek backward (-5s)
+        - K : Play/Pause
+        - L : Seek forward (+5s)
+        - , (comma) : Frame backward
+        - ; (semicolon) : Frame forward
+        - M : Mute/Unmute
+        """
+        if event.isAutoRepeat():
+            return
+        
+        key = event.key()
+        
+        if key in (Qt.Key_Space, Qt.Key_L):  # Space or L for play/pause
+            self.toggle_play_pause()
+        elif key == Qt.Key_Left or (event.text() == 'j' or event.text() == 'J'):  # Left arrow or J
+            self.seek_backward()
+        elif key == Qt.Key_Right or (event.text() == 'l' or event.text() == 'L'):  # Right arrow or L
+            self.seek_forward()
+        elif event.text() == 'k' or event.text() == 'K':  # K for play/pause
+            self.toggle_play_pause()
+        elif event.text() == ',' or key == Qt.Key_Comma:  # Comma for frame backward
+            self.frame_backward()
+        elif event.text() == ';' or key == Qt.Key_Semicolon:  # Semicolon for frame forward
+            self.frame_forward()
+        elif key == Qt.Key_M:  # M for mute
+            self.toggle_mute()
+        else:
+            super().keyPressEvent(event)
 
     def export_clip(self) -> None:
         # Export the current single selection (start_ms/end_ms)
